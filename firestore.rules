@@ -1,0 +1,140 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: bookings
+    // Document ID: auto-generated
+    // Fields:
+    //   - name: string (required, 1-100 chars)
+    //   - email: string (required, valid email)
+    //   - phone: string (required, 1-20 chars)
+    //   - birthDate: string (required, ISO 8601 format)
+    //   - birthTime: string (required, HH:mm format)
+    //   - birthLocation: string (required, 1-100 chars)
+    //   - message: string (optional, 0-1000 chars)
+    //   - status: string (required, enum: ['pending', 'reviewed', 'confirmed', 'cancelled'])
+    //   - createdAt: timestamp (required)
+    //   - uid: string (optional, owner ID)
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isDocOwner() {
+      return isAuthenticated() && request.auth.uid == resource.data.uid;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        ((request.auth.token.email == "upsociall.hub@gmail.com" && request.auth.token.get('email_verified', false) == true) ||
+          (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+           get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin'));
+    }
+
+    function isValidEmail(email) {
+      return email is string &&
+        email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    function isValidDateString(dateStr) {
+      return dateStr is string &&
+        dateStr.matches("^\\d{4}-\\d{2}-\\d{2}$");
+    }
+
+    function isValidTimeString(timeStr) {
+      return timeStr is string &&
+        timeStr.matches("^\\d{2}:\\d{2}$");
+    }
+
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+
+    function isValidBooking(data) {
+      return hasRequiredFields(['name', 'email', 'phone', 'birthDate', 'birthTime', 'birthLocation', 'status', 'createdAt']) &&
+             hasOnlyAllowedFields(['name', 'email', 'phone', 'birthDate', 'birthTime', 'birthLocation', 'message', 'status', 'createdAt', 'uid']) &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 100 &&
+             isValidEmail(data.email) &&
+             data.phone is string && data.phone.size() > 0 && data.phone.size() <= 20 &&
+             isValidDateString(data.birthDate) &&
+             isValidTimeString(data.birthTime) &&
+             data.birthLocation is string && data.birthLocation.size() > 0 && data.birthLocation.size() <= 100 &&
+             (!('message' in data) || (data.message is string && data.message.size() <= 1000)) &&
+             data.status in ['pending', 'reviewed', 'confirmed', 'cancelled'] &&
+             data.createdAt is timestamp &&
+             (!('uid' in data) || data.uid == null || data.uid is string);
+    }
+
+    function isValidContact(data) {
+      return hasRequiredFields(['name', 'email', 'message', 'createdAt']) &&
+             hasOnlyAllowedFields(['name', 'email', 'message', 'createdAt']) &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 100 &&
+             isValidEmail(data.email) &&
+             data.message is string && data.message.size() > 0 && data.message.size() <= 2000 &&
+             data.createdAt is timestamp;
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /bookings/{bookingId} {
+      // Allow creation for anyone (public booking request)
+      // But if they are logged in, we should ensure their UID is correctly set if provided
+      allow create: if isValidBooking(request.resource.data) &&
+                      (request.resource.data.get('uid', null) == null || 
+                       (isAuthenticated() && request.resource.data.uid == request.auth.uid));
+      
+      // Only the owner or an admin can read their own booking
+      allow read: if isAdmin() || (isAuthenticated() && resource.data.uid == request.auth.uid);
+      
+      // Only an admin can update the status or other fields
+      // Or the owner can update their own booking if it's still pending
+      allow update: if isValidBooking(request.resource.data) &&
+                      (isAdmin() || 
+                       (isAuthenticated() && 
+                        resource.data.uid == request.auth.uid && 
+                        resource.data.status == 'pending' &&
+                        request.resource.data.uid == resource.data.uid &&
+                        request.resource.data.createdAt == resource.data.createdAt));
+      
+      // Only an admin can delete bookings
+      allow delete: if isAdmin();
+    }
+
+    match /contacts/{contactId} {
+      // Allow creation for anyone (public contact form)
+      allow create: if isValidContact(request.resource.data);
+      
+      // Only an admin can read or delete contact submissions
+      allow read, delete: if isAdmin();
+    }
+
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create: if isOwner(userId) && request.resource.data.role == 'client';
+      allow update: if (isOwner(userId) && request.resource.data.role == resource.data.role) || isAdmin();
+    }
+  }
+}
